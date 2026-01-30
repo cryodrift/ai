@@ -30,15 +30,15 @@ Dieses Modul bietet eine CLI-Schnittstelle zur Interaktion mit verschiedenen AI-
 
 
 # EXAMPLES
-### Chat Modus
-Einfacher Chat mit mehreren Quelldateien und Ausgabe in eine HTML-Datei:
+### resp Modus
+Einfacher resp mit mehreren Quelldateien und Ausgabe in eine HTML-Datei:
 ```bash
-php index.php -echo /ai chat -model="gpt-4o" -provider=oairesp -content="src/app/input.txt" -content="src/app/docs.md" -outfile="src/app/result.html" -send
+php index.php -echo /ai resp -model="gpt-4o" -provider=oairesp -content="src/app/input.txt" -content="src/app/docs.md" -outfile="src/app/result.html" -send
 ```
 
-Chat über Pipe (Standard-Input):
+resp über Pipe (Standard-Input):
 ```bash
-echo "Übersetze dies ins Englische" | php index.php -echo /ai chat -model="gpt-4o" -provider=oairesp -content -outfile="result.txt" -send
+echo "Übersetze dies ins Englische" | php index.php -echo /ai resp -model="gpt-4o" -provider=oairesp -content -outfile="result.txt" -send
 ```
 
 ### Batch Modus

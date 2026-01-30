@@ -31,10 +31,11 @@ class Cli implements Handler
 
 
     /**
-     * @cli Chat Completion
+     * @cli Responses
+     * @cli this is more expensive then batch
      *
      */
-    protected function chat(Context $ctx, ParamProvider $provider, ParamModel $model, ParamFiles $content, string $outfile = '', string $id = '', bool $send = false): string
+    protected function resp(Context $ctx, ParamProvider $provider, ParamModel $model, ParamFiles $content, string $outfile = '', string $id = '', bool $send = false): string
     {
         $out = '';
         $data = Core::iterate($content, fn(ParamFile $file) => $file->value);
