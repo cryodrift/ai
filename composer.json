@@ -3,7 +3,7 @@
     "description": "Inference Api Client",
     "type": "library",
     "license": "MIT",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "require": {
         "php": ">=8.4",
         "cryodrift/fw": "^0.1.0"
