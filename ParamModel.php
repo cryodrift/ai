@@ -17,12 +17,14 @@ class ParamModel implements Param
         $models = Core::iterate($providers, function (Provider $provider) use ($agent) {
             $provider->url = $provider->modelsurl;
 //            Core::echo(__METHOD__, 'provider', $provider->modelsurl);
-            return Core::iterate(Core::extractKeys(Cli::fetchModels($provider, $agent), ['id'], true), function ($v) {
+            return Core::catch(function () use ($provider, $agent) {
+                return Core::iterate(Core::extractKeys(Cli::fetchModels($provider, $agent), ['id'], true), function ($v) {
 //                Core::echo(__METHOD__,$v);
-                return Core::getValue('id', $v);
-            });
+                    return Core::getValue('id', $v);
+                });
+            }, false);
         }, false, true);
-        $models=array_flip($models);
+        $models = array_flip($models);
 //        Core::echo(__METHOD__, $models, $value);
 
         if (Core::getValue($value, $models) === '') {

@@ -35,7 +35,7 @@ class Cli implements Handler
      * @cli this is more expensive then batch
      *
      */
-    protected function resp(Context $ctx, ParamProvider $provider, ParamModel $model, ParamFiles $content, string $outfile = '', string $id = '', bool $send = false): string
+    protected function resp(Context $ctx, ParamProvider $provider, ParamModel $model, ParamFiles $content, string $fileid = '', string $outfile = '', string $id = '', bool $send = false): string
     {
         $out = '';
         $data = Core::iterate($content, fn(ParamFile $file) => $file->value);
@@ -43,6 +43,18 @@ class Cli implements Handler
         $payload = self::getPayload($provider->value->payload, $model->value, PHP_EOL . implode(PHP_EOL, $data));
         if ($id) {
             $payload['previous_response_id'] = $id;
+        }
+        if ($fileid) {
+            $textcontent = $payload['input'];
+            $payload['input'] = [
+              [
+                'role' => 'user',
+                'content' => [
+                  ['type' => 'input_text', 'text' => $textcontent],
+                  ['type' => 'input_file', 'file_id' => $fileid],
+                ]
+              ]
+            ];
         }
         //        Core::echo(__METHOD__, $payload);
         $out .= Core::toLog('Payload:', $payload);
@@ -56,9 +68,15 @@ class Cli implements Handler
             Core::fileWrite($this->datadir . $filename . '_all.chat', $json);
             $out = '';
             if ($outfile) {
-                $status = $this->extract(new ParamFile($ctx, 'msg', $msg, true), $outfile);
-                if (!str_starts_with($status, 'Done')) {
-                    $out = $msg;
+                if (str_ends_with($outfile, 'html')) {
+                    $status = $this->extract(new ParamFile($ctx, 'msg', $msg, true), $outfile);
+                    if (!str_starts_with($status, 'Done')) {
+                        $out = $msg;
+                    }
+                } else {
+                    $parts = Core::extractKeys($data, ['content']);
+                    $parts = Core::extractKeys($parts, ['text']);
+                    Core::fileWrite($outfile, Core::getValue('text', $parts));
                 }
             }
             $out .= Core::toLog('File:', $this->datadir . $filename, 'ID:', Core::getValue('id', $data));
@@ -69,30 +87,13 @@ class Cli implements Handler
     }
 
     /**
-     * @cli extract html from message
+     * @cli führt Phasen aus
      */
-    protected function extract(ParamFile $msg, string $outfile): string
+    protected function phases(Context $ctx, ParamFile $prompts, string $outfile, int $phase, ParamModel $model, ParamProvider $provider, bool $send = false): string
     {
-        $out = self::getHtml($msg->value);
-        if ($out) {
-            Core::fileWrite($outfile, $out);
-            return 'Done' . PHP_EOL;
-        }
-        return 'NO HTML FOUND' . PHP_EOL;
-    }
-
-    /**
-     * @cli show available models for Provider
-     */
-    protected function models(ParamProvider $provider, bool $send = false): string
-    {
-        $provider->value->url = $provider->value->modelsurl;
-        if ($send) {
-            $out = self::fetchModels($provider->value, $this->agent);
-            return CliUi::arrayToCli($out);
-        } else {
-            return CliUi::arrayToCli(['url' => $provider->value->url]);
-        }
+        $out = '';
+        $out = Core::toLog('phases', explode('###;', $prompts->value));
+        return $out;
     }
 
     /**
@@ -119,12 +120,19 @@ class Cli implements Handler
                         $json = self::fetch($provider->value, [], $send, post: false, agent: $this->agent);
                         if ($outfile) {
                             $data = self::extractFile($json);
-                            $data = Core::toLog($data);
+
                             if (str_ends_with($outfile, '.html')) {
-                                $out = self::getHtml($data);
+                                $out = self::getHtml(Core::toLog($data));
                                 if ($out) {
                                     $data = $out;
+                                } else {
+                                    $data = Core::toLog($data);
                                 }
+                            } elseif (str_ends_with($outfile, '.text')) {
+                                $data = Core::extractKeys($data, ['content']);
+                                $data = Core::extractKeys($data, ['text']);
+                                $data = Core::getValue('text', $data);
+                                Core::echo(__METHOD__, $data);
                             }
                             Core::fileWrite($outfile, $data);
                             return 'Done: ' . $outfile . PHP_EOL;
@@ -168,6 +176,10 @@ class Cli implements Handler
                             return Core::toLog('Batch Failed!', $state);
                             break;
                         default:
+                            $batchInfo['created_at'] = date('Y-m-d H:i:s', $batchInfo['created_at']);
+                            $batchInfo['in_progress_at'] = date('Y-m-d H:i:s', $batchInfo['in_progress_at']);
+                            $batchInfo['expires_at'] = date('Y-m-d H:i:s', $batchInfo['expires_at']);
+
                             return Core::toLog(Colors::get('Batch status: ', Colors::FG_light_green), $batchInfo['status'], $batchInfo);
                     }
             }
@@ -177,10 +189,7 @@ class Cli implements Handler
         // 1. Upload file
         $uploadParams = self::createFileUpload($dataString, $provider->value, $model->value);
         $uploadUrl = str_replace(self::REMOVE, '/files', $provider->value->url);
-        $batchUrl = str_replace(self::REMOVE, '/batches', $provider->value->url);
-
         $result = Core::fileReadOnce($uploadUrl, true, $uploadParams);
-
         $uploadResp = Core::jsonRead($result);
         Core::echo(__METHOD__, $uploadParams, $uploadResp);
         $fileId = $uploadResp['id'] ?? throw new \Exception('Upload failed: ' . $result);
@@ -191,6 +200,8 @@ class Cli implements Handler
           'endpoint' => parse_url($provider->value->url, PHP_URL_PATH),
           'completion_window' => '24h'
         ];
+
+        $batchUrl = str_replace(self::REMOVE, '/batches', $provider->value->url);
         $provider->value->url = $batchUrl;
         if (!$send) {
             Core::echo(__METHOD__, self::deleteFile($provider->value, $fileId));
@@ -235,7 +246,12 @@ class Cli implements Handler
                 }
             }
         }
-        $out .= CliUi::arrayToCli(Core::iterate(Core::dirList($this->datadir, fn(\SplFileInfo $f) => $f->getExtension() === 'batch'), function (\SplFileInfo $f) {
+
+        $data = iterator_to_array(Core::dirList($this->datadir, fn(\SplFileInfo $f) => $f->getExtension() === 'batch'));
+        uasort($data, function (\SplFileInfo $a, \SplFileInfo $b) {
+            return $a->getCTime() <=> $b->getCTime();
+        });
+        $out .= CliUi::arrayToCli(Core::iterate($data, function (\SplFileInfo $f) {
             return [Core::shift(explode('.' . $f->getExtension(), $f->getBasename())) => date('Y-m-d H:i:s', $f->getCTime())];
         }));
         return $out;
@@ -244,36 +260,130 @@ class Cli implements Handler
     /**
      * @cli list and delete files
      */
-    protected function files(ParamProvider $provider, string $id = '', string $outfile = '', bool $delete = false, bool $read = false): string
+    protected function files(ParamProvider $provider, string $id = '', string $outfile = '', bool $delete = false, bool $read = false, bool $send = false, ?ParamFile $upload = null): string
     {
         $baseUrl = str_replace(self::REMOVE, '', $provider->value->url);
         $filesUrl = $baseUrl . '/files';
+        if ($upload) {
+            $uploadParams = self::createFileUpload($upload->value, $provider->value, basename($upload->filename), true);
+            $uploadUrl = str_replace(self::REMOVE, '/files', $provider->value->url);
+            if ($send) {
+                $result = Core::fileReadOnce($uploadUrl, true, $uploadParams);
+                $uploadResp = Core::jsonRead($result);
+                Core::echo(__METHOD__, $uploadParams, $uploadResp);
+                $fileId = $uploadResp['id'] ?? throw new \Exception('Upload failed: ' . $result);
+                return Core::toLog('FileId:', $fileId);
+            }
+            return Core::toLog('Uploaddata:', $uploadParams, $uploadUrl);
+        }
         if ($id) {
             if ($delete) {
                 return self::deleteFile($provider->value, $id);
             }
             if ($read) {
                 $provider->value->url = $filesUrl . '/' . $id;
-                $res = Core::jsonRead(self::fetch($provider->value, [], send: true, post: false, agent: $this->agent));
-//                Core::echo(__METHOD__, $res);
+
+                $fileinfo = Core::jsonRead(self::fetch($provider->value, [], send: true, post: false, agent: $this->agent));
+
                 $provider->value->url = $filesUrl . '/' . $id . '/content';
                 $res = self::fetch($provider->value, [], send: true, post: false, agent: $this->agent);
-                $data = self::extractFile($res);
-                $filename = $outfile ?: $this->datadir . $id . '.json';
-                $data = Core::toLog($data);
-                if (str_ends_with($outfile, '.html')) {
-                    $data = self::getHtml($data) ?: $data;
+                $data = Core::catch(fn() => self::extractFile($res), false);
+                if ($data) {
+                    $filename = $outfile ?: $this->datadir . $id . '.json';
+                    $data = Core::toLog($data);
+                    if (str_ends_with($outfile, '.html')) {
+                        $data = self::getHtml($data) ?: $data;
+                    }
+                } else {
+//                    Core::echo(__METHOD__, $fileinfo);
+                    $filename = $outfile ?: $this->datadir . $id . '_' . $fileinfo['filename'];
+                    $data = $res;
                 }
+
                 Core::fileWrite($filename, $data);
                 return Core::toLog('File written to: ', $filename);
             }
         }
 
         $provider->value->url = $filesUrl;
-        $out = self::fetch($provider->value, [], send: true, post: false, agent: $this->agent);
+        $files = Core::jsonRead(self::fetch($provider->value, [], send: true, post: false, agent: $this->agent));
+        uasort($files['data'], function (array $a, array $b) {
+            return $a['purpose'] <=> $b['purpose'];
+        });
+        $files = Core::iterate($files['data'], function (array $info) {
+            $info['created_at'] = date('Y-m-d H:i:s', $info['created_at']);
+            return [$info['purpose'] => Core::extractKeys($info, ['id', 'filename', 'status', 'created_at'])];
+        });
+
+        $out = Core::toLog(CliUi::arrayToCli($files));
 
         return $out;
     }
+
+
+    /**
+     * @cli extract html from message
+     */
+    protected function extract(ParamFile $msg, string $outfile): string
+    {
+        $out = self::getHtml($msg->value);
+        if ($out) {
+            Core::fileWrite($outfile, $out);
+            return 'Done' . PHP_EOL;
+        }
+        return 'NO HTML FOUND' . PHP_EOL;
+    }
+
+    /**
+     * @cli show available models for Provider
+     */
+    protected function models(ParamProvider $provider, bool $send = false): string
+    {
+        $provider->value->url = $provider->value->modelsurl;
+        if ($send) {
+            $out = self::fetchModels($provider->value, $this->agent);
+            return CliUi::arrayToCli($out);
+        } else {
+            return CliUi::arrayToCli(['url' => $provider->value->url]);
+        }
+    }
+
+    /**
+     * @cli unpack files from JSON-CONTAINER
+     * @cli OUTPUT FORMAT CONTRACT (MANDATORY, DO NOT CHANGE TASK LOGIC):
+     * @cli - Output exactly one JSON object, no other text.
+     * @cli - Schema name: "llm-bundle/v1".
+     * @cli - Every JS class/module must be in its own file entry under "files".
+     * @cli - Paths are relative POSIX paths, no "..", no duplicates.
+     * @cli - Use ES module relative imports.
+     * @cli
+     * @cli END OUTPUT FORMAT CONTRACT (MANDATORY, DO NOT CHANGE TASK LOGIC);
+     */
+    protected function unpack(ParamFile $json, string $subdir = '', string $dir = '', bool $write = false): string
+    {
+        $data = Core::jsonRead($json->value);
+        $parts = explode('.', $json->filename);
+        array_pop($parts);
+        $subdir = $subdir ?: basename(implode('.', $parts));
+        $dir = $dir ?: $this->datadir;
+//        Core::echo(__METHOD__,$data);
+        $res = Core::iterate($data['files'], function (array $file) use ($dir, $subdir, $write) {
+            $pathname = $dir . $subdir . '/' . $file['path'];
+
+            if ($write) {
+                Core::fileWrite($pathname, $file['content'], 0, true);
+                return 'file:' . $pathname . ' size:' . strlen($file['content']);
+            } else {
+                Core::echo('file', $pathname, 'size:', strlen($file['content']));
+            }
+        });
+        if ($res) {
+            return Core::toLog(CliUi::arrayToCli([Colors::get('Written:', Colors::FG_light_green) => $res]));
+        } else {
+            return '';
+        }
+    }
+
 
     public static function extractFile(string $json): array
     {
@@ -375,42 +485,87 @@ class Cli implements Handler
         }
     }
 
-    private static function createFileUpload(string $content, Provider $provider, string $model): array
+    private static function createFileUpload(string $content, Provider $provider, string $model = '', bool $asfile = false): array
     {
-        $jsonl = Core::jsonWrite([
-            'custom_id' => 'req_1',
-            'method' => 'POST',
-            'url' => parse_url($provider->url, PHP_URL_PATH),
-            'body' => [
-              'model' => $model,
-              'input' => $content
-//                  'messages' => [['role' => 'user', 'content' => $file->value]]
-            ]
-          ], 0) . "\n";
-
+        // Boundary für multipart/form-data
         $boundary = '--------------------------' . microtime(true);
-        $multipart = "--$boundary\r\n";
-        $multipart .= "Content-Disposition: form-data; name=\"purpose\"\r\n\r\n";
-        $multipart .= "batch\r\n";
-        $multipart .= "--$boundary\r\n";
-        $multipart .= "Content-Disposition: form-data; name=\"file\"; filename=\"batch.jsonl\"\r\n";
-        $multipart .= "Content-Type: application/octet-stream\r\n\r\n";
-        $multipart .= $jsonl;
-        $multipart .= "\r\n--$boundary--\r\n";
 
-        $uploadHeaders = [
-          'Authorization: Bearer ' . $provider->bearer,
-          'Content-Type: multipart/form-data; boundary=' . $boundary,
-        ];
-        $uploadParams = [
+        // Wenn $asfile=true: normales File hochladen (purpose=assistants) und $content ist der Dateinhalt
+        if ($asfile) {
+            // Multipart Body zusammenbauen
+            $multipart = "--$boundary\r\n";
+            // purpose setzen (normaler Upload)
+            $multipart .= "Content-Disposition: form-data; name=\"purpose\"\r\n\r\n";
+            $multipart .= "assistants\r\n";
+            $multipart .= "--$boundary\r\n";
+            // Datei-Part (Inhalt ist direkt $content)
+            $multipart .= "Content-Disposition: form-data; name=\"file\"; filename=\"$model\"\r\n";
+            $multipart .= "Content-Type: application/pdf\r\n\r\n";
+            $multipart .= Pdf::getPdf($content);
+            $multipart .= "\r\n--$boundary--\r\n";
+
+            // Upload Headers
+            $uploadHeaders = [
+                // Auth Header
+              'Authorization: Bearer ' . $provider->bearer,
+                // multipart boundary
+              'Content-Type: multipart/form-data; boundary=' . $boundary,
+            ];
+        } else {
+            // Sonst: Batch-Upload (purpose=batch) mit JSONL-Request
+            $updata = [
+                // Optional: custom_id pro Request
+              'custom_id' => 'req_1',
+                // HTTP method für den Batch-Request
+              'method' => 'POST',
+                // Ziel-URL des Batch-Jobs (nur Path)
+              'url' => parse_url($provider->url, PHP_URL_PATH),
+                // Body des eigentlichen Requests
+              'body' => [
+                  // Model für responses.create
+                'model' => $model,
+                  // Input als Text
+                'input' => $content,
+              ],
+            ];
+
+            // JSONL: genau eine Zeile
+            $jsonl = Core::jsonWrite($updata, 0) . "\n";
+
+            // Multipart Body zusammenbauen
+            $multipart = "--$boundary\r\n";
+            // purpose setzen (Batch)
+            $multipart .= "Content-Disposition: form-data; name=\"purpose\"\r\n\r\n";
+            $multipart .= "batch\r\n";
+            $multipart .= "--$boundary\r\n";
+            // Datei-Part (Batch JSONL)
+            $multipart .= "Content-Disposition: form-data; name=\"file\"; filename=\"batch.jsonl\"\r\n";
+            $multipart .= "Content-Type: application/octet-stream\r\n\r\n";
+            $multipart .= $jsonl;
+            $multipart .= "\r\n--$boundary--\r\n";
+
+            // Upload Headers
+            $uploadHeaders = [
+                // Auth Header
+              'Authorization: Bearer ' . $provider->bearer,
+                // multipart boundary
+              'Content-Type: multipart/form-data; boundary=' . $boundary,
+            ];
+        }
+
+        // stream_context Parameter
+        return [
           'http' => [
+              // POST request
             'method' => 'POST',
+              // Header lines
             'header' => implode("\r\n", $uploadHeaders) . "\r\n",
+              // Body
             'content' => $multipart,
+              // Fehlerbody trotzdem lesen
             'ignore_errors' => true,
-          ]
+          ],
         ];
-        return $uploadParams;
     }
 
     public static function deleteFile(Provider $provider, string $fileid): string
