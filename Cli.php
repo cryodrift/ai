@@ -368,9 +368,10 @@ class Cli implements Handler
      * @cli unpack files from JSON-CONTAINER
      * @cli OUTPUT FORMAT CONTRACT (MANDATORY, DO NOT CHANGE TASK LOGIC):
      * @cli - Output exactly one JSON object, no other text.
-     * @cli - Schema name: "llm-bundle/v1".
+     * @cli - Schema name: "JsonContainerV1".
      * @cli - Every JS class/module must be in its own entry under "files" structure: files.filename=data.
      * @cli - Paths are relative POSIX paths, no "..", no duplicates.
+     * @cli - pathnames are lowercase only
      * @cli - Use ES module relative imports.
      * @cli
      * @cli END OUTPUT FORMAT CONTRACT (MANDATORY, DO NOT CHANGE TASK LOGIC);
@@ -400,6 +401,25 @@ class Cli implements Handler
             return Core::toLog(CliUi::arrayToCli([Colors::get('Written:', Colors::FG_light_green) => $res]));
         } else {
             return '';
+        }
+    }
+
+    /**
+     * @cli pack folder into JsonContainerV1
+     */
+    protected function pack(string $dir, string $outfile = ''): string
+    {
+        $dir = strtr($dir, '\\', '/');
+        $data = Core::iterate(Core::dirList($dir), function (\SplFileInfo $file) use ($dir) {
+            if (!$file->isDir()) {
+                return [str_replace($dir, '', strtr($file->getPathname(), '\\', '/')), file_get_contents($file->getRealPath())];
+            }
+        }, true);
+        if ($outfile) {
+            Core::fileWrite($outfile, Core::jsonWrite(['schema' => 'JsonContainerV1', 'files' => $data]));
+            return Core::toLog('Created: ', $outfile);
+        } else {
+            return Core::toLog($data);
         }
     }
 
@@ -486,13 +506,16 @@ class Cli implements Handler
         return $out;
     }
 
-    public static function getHeaders(string $bearer, array $headers = []): array
+    public static function getHeaders(string $bearer, array $headers = [], bool $json = true): array
     {
-        return [
+        $out = [
           'Authorization: Bearer ' . $bearer,
-          'Content-Type: application/json',
           ...Core::iterate($headers, fn($v, $k) => $k . ': ' . $v)
         ];
+        if ($json) {
+            $out[] = 'Content-Type: application/json';
+        }
+        return $out;
     }
 
     public static function getHtml(string $text): string
@@ -544,14 +567,6 @@ class Cli implements Handler
             $multipart .= "Content-Type: application/pdf\r\n\r\n";
             $multipart .= Pdf::getPdf($content);
             $multipart .= "\r\n--$boundary--\r\n";
-
-            // Upload Headers
-            $uploadHeaders = [
-                // Auth Header
-              'Authorization: Bearer ' . $provider->bearer,
-                // multipart boundary
-              'Content-Type: multipart/form-data; boundary=' . $boundary,
-            ];
         } else {
             // Sonst: Batch-Upload (purpose=batch) mit JSONL-Request
             $updata = [
@@ -584,15 +599,12 @@ class Cli implements Handler
             $multipart .= "Content-Type: application/octet-stream\r\n\r\n";
             $multipart .= $jsonl;
             $multipart .= "\r\n--$boundary--\r\n";
-
-            // Upload Headers
-            $uploadHeaders = [
-                // Auth Header
-              'Authorization: Bearer ' . $provider->bearer,
-                // multipart boundary
-              'Content-Type: multipart/form-data; boundary=' . $boundary,
-            ];
         }
+        // Upload Headers
+        $uploadHeaders = self::getHeaders($provider->bearer, [
+          'Content-Type' => 'multipart/form-data; boundary=' . $boundary,
+          ...$provider->headers
+        ], false);
 
         // stream_context Parameter
         return [
