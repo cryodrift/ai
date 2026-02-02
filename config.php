@@ -8,8 +8,10 @@
  * @env AI_APIKEY_XAI=""
  * @env AI_APIKEY_CLD=""
  * @env AI_DATADIR=".cryodrift/data/ai/"
+ * @env AI_CACHEDIR=".cryodrift/cache/ai/"
  */
 
+use cryodrift\ai\Cache;
 use cryodrift\ai\ParamModel;
 use cryodrift\ai\ParamProvider;
 use cryodrift\ai\Provider;
@@ -37,6 +39,9 @@ $cfg[ParamProvider::class] = [
     new Provider('xaichat', 'https://api.x.ai/v1/chat/completions', Core::env('AI_APIKEY_XAI'), payload: 'hug'),
     ...$modelproviders
   ]
+];
+$cfg[Cache::class] = [
+    'cachedir'=>Core::env('AI_CACHEDIR')
 ];
 $cfg[ParamModel::class] = [
   'agent' => 'cryodrift/ai cli 0.1',

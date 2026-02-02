@@ -12,13 +12,14 @@ class ParamModel implements Param
 
     public function __construct(Context $ctx, public string $name, public string $value)
     {
+        $cache = Core::newObject(Cache::class, $ctx);
         $providers = Core::getValue('providers', $ctx->config(self::class), []);
         $agent = Core::getValue('agent', $ctx->config(self::class));
-        $models = Core::iterate($providers, function (Provider $provider) use ($agent) {
+        $models = Core::iterate($providers, function (Provider $provider) use ($agent, $cache) {
             $provider->url = $provider->modelsurl;
 //            Core::echo(__METHOD__, 'provider', $provider->modelsurl);
-            return Core::catch(function () use ($provider, $agent) {
-                return Core::iterate(Core::extractKeys(Cli::fetchModels($provider, $agent), ['id'], true), function ($v) {
+            return Core::catch(function () use ($provider, $agent, $cache) {
+                return Core::iterate(Core::extractKeys(Cli::fetchModels($provider, $agent, $cache), ['id'], true), function ($v) {
 //                Core::echo(__METHOD__,$v);
                     return Core::getValue('id', $v);
                 });
