@@ -30,7 +30,7 @@ $modelproviders = [
   new Provider('oairesp', 'https://api.openai.com/v1/responses', Core::env('AI_APIKEY_OPENAI'), modelsurl: 'https://api.openai.com/v1/models', payload: 'oai'),
   new Provider('xairesp', 'https://api.x.ai/v1/responses', Core::env('AI_APIKEY_XAI'), modelsurl: 'https://api.x.ai/v1/models', payload: 'oai'),
   new Provider('locresp', 'http://127.0.0.1:2001/v1/chat/completions', Core::env('AI_APIKEY_CLD'), modelsurl: 'http://127.0.0.1:2001/v1/models', payload: 'hug'),
-  new Provider('cldresp', 'https://api.anthropic.com/v1/messages', Core::env('AI_APIKEY_CLD'), ['x-api-key' => Core::env('AI_APIKEY_CLD'), 'anthropic-version' => '2023-06-01'], modelsurl: 'https://api.anthropic.com/v1/models', payload: 'hug'),
+  new Provider('cldresp', 'https://api.anthropic.com/v1/messages', Core::env('AI_APIKEY_CLD'), ['x-api-key' => Core::env('AI_APIKEY_CLD'), 'anthropic-version' => '2023-06-01'], modelsurl: 'https://api.anthropic.com/v1/models', payload: 'cld'),
 ];
 $cfg[ParamProvider::class] = [
   'providers' => [

@@ -6,6 +6,7 @@ use cryodrift\fw\cli\CliUi;
 use cryodrift\fw\cli\Colors;
 use cryodrift\fw\cli\ParamFile;
 use cryodrift\fw\cli\ParamFiles;
+use cryodrift\fw\cli\ParamJson;
 use cryodrift\fw\Config;
 use cryodrift\fw\Context;
 use cryodrift\fw\Core;
@@ -62,21 +63,21 @@ class Cli implements Handler
         if ($send) {
             $data = Core::catch(fn() => Core::jsonRead($json));
             $filename = md5($out);
-            Core::fileWrite($this->datadir . $filename . '_in.chat', $out);
+            Core::fileWrite($this->datadir . $filename . '_in.chat', $out, 0, true);
             $msg = Core::toLog(Core::extractKeys($data, ['content']));
-            Core::fileWrite($this->datadir . $filename . '_msg.chat', $msg);
-            Core::fileWrite($this->datadir . $filename . '_all.chat', $json);
+            Core::fileWrite($this->datadir . $filename . '_msg.chat', $msg, 0, true);
+            Core::fileWrite($this->datadir . $filename . '_all.chat', $json, 0, true);
             $out = '';
             if ($outfile) {
                 if (str_ends_with($outfile, 'html')) {
-                    $status = $this->extract(new ParamFile($ctx, 'msg', $msg, true), $outfile);
+                    $status = $this->extract(new ParamFile($ctx, 'msg', $msg, 0, true), $outfile);
                     if (!str_starts_with($status, 'Done')) {
                         $out = $msg;
                     }
                 } else {
                     $parts = Core::extractKeys($data, ['content']);
                     $parts = Core::extractKeys($parts, ['text']);
-                    Core::fileWrite($outfile, Core::getValue('text', $parts));
+                    Core::fileWrite($outfile, Core::getValue('text', $parts), 0, true);
                 }
             }
             $out .= Core::toLog('File:', $this->datadir . $filename, 'ID:', Core::getValue('id', $data));
@@ -99,14 +100,119 @@ class Cli implements Handler
     /**
      * @cli run a batchjob, run again to ping, run again to download results
      */
-    protected function batch(ParamFiles $content, ParamModel $model, ParamProvider $provider, string $outfile = '', string $id = '', bool $send = false, bool $stop = false): string
+    protected function batch(Context $ctx, ParamProvider $provider, ParamModel $model, ParamFiles $content, string $outfile = '', string $id = '', bool $send = false, bool $stop = false): string
+    {
+        if($provider->value->payload==='cld'){
+            return $this->claudebatch($ctx, $provider, $model, $content, $outfile, $id, $send, $stop);
+        }else{
+            return $this->openaibatch($ctx, $provider, $model, $content, $outfile, $id, $send, $stop);
+        }
+
+    }
+    private function claudebatch(Context $ctx, ParamProvider $provider, ParamModel $model, ParamFiles $content, string $outfile = '', string $id = '', bool $send = false, bool $stop = false): string
+    {
+        $hashdata = $model->value . $provider->value->url . implode(', ', $content->getFileNames());
+        $hash = $id ?: md5($hashdata);
+        $stateFile = $this->datadir . $hash . '.batch';
+
+        if ($state = Core::catch(fn() => self::getBatchState($this->datadir . $hash), false)) {
+            $batchUrl = str_replace(self::REMOVE, '/batches', $provider->value->url);
+            switch ($state['status']) {
+                case 'ended':
+                case 'completed':
+                    if ($send) {
+                        $provider->value->url = $batchUrl . '/' . $state['id'] . '/results';
+                        $json = self::fetch($provider->value, [], $send, post: false, agent: $this->agent);
+                        if ($outfile) {
+                            return $this->extract(new ParamFile($ctx, 'msg', $json, 0, true), $outfile, true);
+                        }
+                        return $json;
+                    }
+                    return Core::toLog('Batch completed. ID: ', $state['id'], '. Run with -send to download results.');
+                case 'canceling':
+                    return Core::toLog('Batch is being canceled.', $state);
+                default:
+                    if ($stop) {
+                        $provider->value->url = $batchUrl . '/' . $state['id'] . '/cancel';
+                        $json = self::fetch($provider->value, [], $send, agent: $this->agent);
+                        $cancelInfo = Core::jsonRead($json);
+                        $state['status'] = $cancelInfo['processing_status'] ?? 'canceling';
+                        if ($send) {
+                            Core::fileWrite($stateFile, Core::jsonWrite($state), 0, true);
+                        }
+                        return Core::toLog('Batch cancellation requested: ', $cancelInfo);
+                    }
+
+                    $provider->value->url = $batchUrl . '/' . $state['id'];
+                    $json = self::fetch($provider->value, [], $send, post: false, agent: $this->agent);
+                    $batchInfo = Core::catch(fn() => Core::jsonRead($json));
+                    if (!$batchInfo) {
+                        return Core::toLog(Colors::get('No Connection to:', Colors::FG_light_red), $json, $state);
+                    }
+
+                    $status = $batchInfo['processing_status'] ?? 'unknown';
+                    $state['status'] = $status;
+                    if ($status === 'ended') {
+                        $state['ended'] = date('Y-m-d H:i:s');
+                    }
+                    Core::catch(fn() => Core::fileWrite($stateFile, Core::jsonWrite($state), 0, true));
+
+                    return Core::toLog(Colors::get('Batch status: ' . $status, Colors::FG_light_green), $batchInfo);
+            }
+        }
+
+        $requests = [];
+        foreach ($content as $file) {
+            $requests[] = [
+              "custom_id" => "req_" . uniqid(),
+              "method" => "POST",
+              "url" => "/v1/messages",
+              "params" => [
+                "model" => $model->value,
+                "messages" => [
+                  [
+                    "role" => "user",
+                    "content" => $file->value,
+                  ]
+                ],
+                "max_tokens" => 8192,
+              ]
+            ];
+        }
+
+        $payload = ["requests" => $requests];
+        // Core::toLog('Debug Payload:', $payload); // DEBUG
+        $batchUrl = str_replace(self::REMOVE, '/batches', $provider->value->url);
+        $provider->value->url = $batchUrl;
+
+        $json = self::fetch($provider->value, $payload, $send, agent: $this->agent);
+        if ($send) {
+            Core::fileWrite($this->datadir . $hash . '_payload.json', Core::jsonWrite($payload), 0, true);
+            $batchResp = Core::jsonRead($json);
+            $batchId = $batchResp['id'] ?? throw new \Exception('Claude Batch creation failed: ' . $json);
+            Core::fileWrite($stateFile, Core::jsonWrite([
+                'id' => $batchId,
+                'status' => $batchResp['processing_status'] ?? 'created',
+                'provider' => (array)$provider->value,
+                'model' => $model->value,
+                'started' => date('Y-m-d H:i:s')
+            ]), 0, true);
+
+            return Core::toLog('Claude Batch created: ', $batchResp, 'id:', $hash);
+        }
+
+        return Core::toLog('Ready to send Claude batch request. Use -send to start.', $payload);
+    }
+
+    private function openaibatch(Context $ctx, ParamProvider $provider, ParamModel $model, ParamFiles $content, string $outfile = '', string $id = '', bool $send = false, bool $stop = false): string
     {
         $out = '';
 
         $data = Core::iterate($content, fn(ParamFile $file) => $file->value);
         $dataString = implode(PHP_EOL, $data);
-        $hash = md5($dataString . $model->value . $provider->value->url);
-
+        $hashdata = $model->value . $provider->value->url . implode(', ', $content->getFileNames());
+        $hash = md5($hashdata);
+        Core::echo(__METHOD__, $hashdata);
         if ($id) {
             $hash = $id;
         }
@@ -120,26 +226,7 @@ class Cli implements Handler
                         $provider->value->url = $uploadUrl . '/' . $state['output_file_id'] . '/content';
                         $json = self::fetch($provider->value, [], $send, post: false, agent: $this->agent);
                         if ($outfile) {
-                            $data = Core::catch(fn() => self::extractFile($json), false);
-                            if ($data) {
-                                if (str_ends_with($outfile, '.html')) {
-                                    $out = self::getHtml(Core::toLog($data));
-                                    if ($out) {
-                                        $data = $out;
-                                    } else {
-                                        $data = Core::toLog($data);
-                                    }
-                                } elseif (str_ends_with($outfile, '.text')) {
-                                    $data = Core::extractKeys($data, ['content']);
-                                    $data = Core::extractKeys($data, ['text']);
-                                    $data = Core::getValue('text', $data);
-                                    Core::echo(__METHOD__, $data);
-                                }
-                            } else {
-                                return Core::toLog(Colors::get('FAILED OUTFILE', Colors::FG_light_red), $json);
-                            }
-                            Core::fileWrite($outfile, $data);
-                            return 'Done: ' . $outfile . PHP_EOL;
+                            return $this->extract(new ParamFile($ctx, 'msg', $json, true), $outfile, true);
                         }
                         return $json;
                     }
@@ -159,13 +246,16 @@ class Cli implements Handler
                         }
                         $state['status'] = $cancelInfo['status'] ?? 'cancelling';
                         if ($send) {
-                            Core::fileWrite($stateFile, Core::jsonWrite($state));
+                            Core::fileWrite($stateFile, Core::jsonWrite($state), 0, true);
                         }
                         return Core::toLog('Batch cancellation requested: ', $cancelInfo);
                     }
                     $provider->value->url = $batchUrl . '/' . $state['id'];
                     $json = self::fetch($provider->value, [], $send, post: false, agent: $this->agent);
-                    $batchInfo = Core::jsonRead($json);
+                    $batchInfo = Core::catch(fn() => Core::jsonRead($json));
+                    if (!$batchInfo) {
+                        return Core::toLog(Colors::get('No Connection to:', Colors::FG_light_red), $json, $state);
+                    }
                     switch (Core::getValue('status', $batchInfo)) {
                         case 'completed':
                             $counts = Core::getValue('request_counts', $batchInfo);
@@ -194,8 +284,8 @@ class Cli implements Handler
                             $batchInfo['expires_at'] = date('Y-m-d H:i:s', $batchInfo['expires_at']);
                             $status = 'Batch status: ';
                     }
-                    Core::catch(fn() => Core::fileWrite($stateFile, Core::jsonWrite($state)));
-                    return Core::toLog(Colors::get($status, Colors::FG_light_green), $batchInfo['status'], $batchInfo, $state);
+                    Core::catch(fn() => Core::fileWrite($stateFile, Core::jsonWrite($state), 0, true));
+                    return Core::toLog(Colors::get($status, Colors::FG_light_green), $batchInfo['status'], $batchInfo, Colors::get($status, Colors::FG_light_green), $batchInfo['status']);
             }
         }
 
@@ -231,7 +321,7 @@ class Cli implements Handler
               'provider' => $provider->value,
               'model' => $model->value,
               'started' => date('Y-m-d H:i:s')
-            ]));
+            ]), 0, true);
 
             return Core::toLog('Batch created: ', $batchResp, 'id:', $hash);
         }
@@ -316,7 +406,7 @@ class Cli implements Handler
                     $data = $res;
                 }
 
-                Core::fileWrite($filename, $data);
+                Core::fileWrite($filename, $data, 0, true);
                 return Core::toLog('File written to: ', $filename);
             }
         }
@@ -340,14 +430,30 @@ class Cli implements Handler
     /**
      * @cli extract html from message
      */
-    protected function extract(ParamFile $msg, string $outfile): string
+    protected function extract(ParamFile $msg, string $outfile, bool $json = false): string
     {
-        $out = self::getHtml($msg->value);
-        if ($out) {
-            Core::fileWrite($outfile, $out);
-            return 'Done' . PHP_EOL;
+        $data = Core::catch(fn() => self::extractFile($msg->value), false);
+        if ($data) {
+            if (str_ends_with($outfile, '.html')) {
+                $out = self::getHtml(Core::toLog($data));
+                if ($out) {
+                    $data = $out;
+                } else {
+                    $data = Core::toLog($data);
+                }
+            } elseif (str_ends_with($outfile, '.text')) {
+                $data = Core::extractKeys($data, ['content']);
+                $data = Core::extractKeys($data, ['text']);
+                $data = Core::getValue('text', $data);
+                Core::echo(__METHOD__, $data);
+            }
+            Core::fileWrite($outfile, $data, 0, true);
+            $out = 'Done: ' . $outfile . PHP_EOL;
+        } else {
+            $out = Core::toLog(Colors::get('FAILED OUTFILE', Colors::FG_light_red), $json);
         }
-        return 'NO HTML FOUND' . PHP_EOL;
+
+        return $out;
     }
 
     /**
@@ -416,7 +522,7 @@ class Cli implements Handler
             }
         }, true);
         if ($outfile) {
-            Core::fileWrite($outfile, Core::jsonWrite(['schema' => 'JsonContainerV1', 'files' => $data]));
+            Core::fileWrite($outfile, Core::jsonWrite(['schema' => 'JsonContainerV1', 'files' => $data]), 0, true);
             return Core::toLog('Created: ', $outfile);
         } else {
             return Core::toLog($data);
@@ -447,7 +553,7 @@ class Cli implements Handler
         return Core::jsonRead($cache->get($key));
     }
 
-    public static function getPayload(string $name, string $model, string $content): array
+    public static function getPayload(string $name, string $model, string $content, float $temp = 0, float $topp = 1): array
     {
         return match ($name) {
             'hug' => [
@@ -459,10 +565,33 @@ class Cli implements Handler
               ],
               'model' => $model,
               'store' => false,
+              'temperature' => $temp,
+              'top_p' => $topp
             ],
             'oai' => [
               'model' => $model,
-              'input' => $content
+              'input' => $content,
+              'temperature' => $temp,
+              'top_p' => $topp
+            ],
+            'cld' => [
+              "requests" => [
+                [
+                  "custom_id" => "req_" . uniqid(),
+                  "method" => "POST",
+                  "url" => "/v1/messages",
+                  "params" => [
+                    "model" => $model,
+                    "messages" => [
+                      [
+                        "role" => "user",
+                        "content" => $content,
+                      ]
+                    ],
+                    "max_tokens" => 8192,
+                  ]
+                ]
+              ]
             ]
         };
     }
@@ -582,6 +711,8 @@ class Cli implements Handler
                 'model' => $model,
                   // Input als Text
                 'input' => $content,
+                'temperature' => 0,
+                'top_p' => 1
               ],
             ];
 
